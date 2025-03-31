@@ -9,7 +9,7 @@ import (
 
 const (
 	// configFileName is the name of the db configuration file stored in the user's home directory
-	configFileName = ".gofluxconfig.json"
+	configFileName = ".gatorconfig.json"
 	// configFileMode defines the file permissions (read/write for owner, read for group and others)
 	configFileMode = 0644
 )
