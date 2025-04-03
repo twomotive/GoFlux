@@ -272,3 +272,20 @@ func HandlerFollowing(s *state.State, cmd Command, user database.User) error {
 
 	return nil
 }
+
+func HandlerUnfollow(s *state.State, cmd Command, user database.User) error {
+	if len(cmd.Args) != 1 {
+		return fmt.Errorf("usage: %v <url>", cmd.Name)
+	}
+
+	url := cmd.Args[0]
+
+	err := s.DB.DeleteFeedFollow(context.Background(), database.DeleteFeedFollowParams{
+		UserID: user.ID,
+		Url:    url,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to unfollow: %v", err)
+	}
+	return nil
+}
