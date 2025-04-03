@@ -2,7 +2,10 @@ package commands
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -128,29 +131,6 @@ func HandlerGetUsers(s *state.State, cmd Command) error {
 
 	return nil
 
-}
-
-func HandlerAgg(s *state.State, cmd Command) error {
-	if len(cmd.Args) != 1 {
-		return fmt.Errorf("usage: %v <time_between_reqs>", cmd.Name)
-	}
-
-	timeStr := cmd.Args[0]
-	timeBetweenRequests, err := time.ParseDuration(timeStr)
-	if err != nil {
-		return fmt.Errorf("invalid duration format: %v", err)
-	}
-
-	fmt.Printf("Collecting feeds every %v\n", timeBetweenRequests)
-
-	// Run immediately and then on ticker
-	ticker := time.NewTicker(timeBetweenRequests)
-	// Immediate first run, then wait for ticker
-	for ; ; <-ticker.C {
-		if err := scrapeFeeds(s); err != nil {
-			fmt.Printf("Error scraping feeds: %v\n", err)
-		}
-	}
 }
 
 func HandlerAddFeed(s *state.State, cmd Command, user database.User) error {
@@ -283,6 +263,75 @@ func HandlerUnfollow(s *state.State, cmd Command, user database.User) error {
 	return nil
 }
 
+func HandlerBrowse(s *state.State, cmd Command, user database.User) error {
+	var limit int32 = 2 // Default limit
+	if len(cmd.Args) > 0 {
+		parsedLimit, err := strconv.Atoi(cmd.Args[0])
+		if err != nil {
+			return fmt.Errorf("invalid limit: %v", err)
+		}
+		limit = int32(parsedLimit)
+	}
+
+	posts, err := s.DB.GetPostsByUser(context.Background(), database.GetPostsByUserParams{
+		UserID: user.ID,
+		Limit:  limit,
+	})
+	if err != nil {
+		return fmt.Errorf("error getting posts: %v", err)
+	}
+
+	if len(posts) == 0 {
+		fmt.Println("No posts found. Follow some feeds first!")
+		return nil
+	}
+
+	fmt.Printf("Found %d posts:\n\n", len(posts))
+	for i, post := range posts {
+		fmt.Printf("=== Post %d ===\n", i+1)
+		fmt.Printf("Title: %s\n", post.Title)
+		fmt.Printf("URL: %s\n", post.Url)
+
+		if post.Description.Valid {
+			// Only show a preview of the description to avoid too much text
+			desc := post.Description.String
+			if len(desc) > 100 {
+				desc = desc[:100] + "..."
+			}
+			fmt.Printf("Description: %s\n", desc)
+		}
+
+		if post.PublishedAt.Valid {
+			fmt.Printf("Published: %s\n", post.PublishedAt.Time.Format(time.RFC1123))
+		}
+		fmt.Printf("Feed: %s\n\n", post.FeedName)
+	}
+
+	return nil
+}
+
+func HandlerAgg(s *state.State, cmd Command) error {
+	if len(cmd.Args) != 1 {
+		return fmt.Errorf("usage: %v <time_between_reqs>", cmd.Name)
+	}
+
+	timeStr := cmd.Args[0]
+	timeBetweenRequests, err := time.ParseDuration(timeStr)
+	if err != nil {
+		return fmt.Errorf("invalid duration format: %v", err)
+	}
+
+	fmt.Printf("Collecting feeds every %v\n", timeBetweenRequests)
+
+	// Run immediately and then on ticker
+	ticker := time.NewTicker(timeBetweenRequests)
+	// Immediate first run, then wait for ticker
+	for ; ; <-ticker.C {
+		if err := scrapeFeeds(s); err != nil {
+			fmt.Printf("Error scraping feeds: %v\n", err)
+		}
+	}
+}
 func scrapeFeeds(s *state.State) error {
 	ctx := context.Background()
 
@@ -306,14 +355,70 @@ func scrapeFeeds(s *state.State) error {
 		return fmt.Errorf("error fetching feed: %v", err)
 	}
 
-	// Iterate over items and print titles
 	fmt.Printf("Found %d items in feed %s\n", len(rssFeed.Channel.Item), feed.Name)
+
+	// Save posts to database
 	for _, item := range rssFeed.Channel.Item {
-		fmt.Printf("- %s\n", item.Title)
-		fmt.Printf("  Link: %s\n", item.Link)
-		fmt.Printf("  Published: %s\n", item.PubDate)
-		fmt.Println()
+		// Parse the published date
+		var publishedAt sql.NullTime
+		if item.PubDate != "" {
+			// Try different time formats
+			parsedTime, err := parseTime(item.PubDate)
+			if err == nil {
+				publishedAt.Time = parsedTime
+				publishedAt.Valid = true
+			} else {
+				fmt.Printf("Warning: Could not parse date '%s': %v\n", item.PubDate, err)
+			}
+		}
+
+		// Create post in database
+		_, err := s.DB.CreatePost(ctx, database.CreatePostParams{
+			ID:          uuid.New(),
+			CreatedAt:   time.Now().UTC(),
+			UpdatedAt:   time.Now().UTC(),
+			Title:       item.Title,
+			Url:         item.Link,
+			Description: sql.NullString{String: item.Description, Valid: item.Description != ""},
+			PublishedAt: publishedAt,
+			FeedID:      feed.ID,
+		})
+
+		if err != nil {
+			// If it's a duplicate URL, just ignore the error
+			if strings.Contains(err.Error(), "duplicate key value violates unique constraint") {
+				continue
+			}
+			// Otherwise log the error
+			fmt.Printf("Error saving post '%s': %v\n", item.Title, err)
+		} else {
+			fmt.Printf("Saved post: %s\n", item.Title)
+		}
 	}
 
 	return nil
+}
+
+// Helper function to parse different time formats
+func parseTime(timeStr string) (time.Time, error) {
+	formats := []string{
+		time.RFC1123Z,
+		time.RFC1123,
+		time.RFC3339,
+		time.RFC822,
+		time.RFC822Z,
+		"Mon, 02 Jan 2006 15:04:05 -0700",
+		"2006-01-02T15:04:05Z",
+		"2006-01-02 15:04:05",
+		"02 Jan 2006 15:04:05 -0700",
+		"02 Jan 2006 15:04:05 MST",
+	}
+
+	for _, format := range formats {
+		if t, err := time.Parse(format, timeStr); err == nil {
+			return t, nil
+		}
+	}
+
+	return time.Time{}, fmt.Errorf("could not parse time: %s", timeStr)
 }
