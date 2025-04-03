@@ -131,34 +131,26 @@ func HandlerGetUsers(s *state.State, cmd Command) error {
 }
 
 func HandlerAgg(s *state.State, cmd Command) error {
-	if len(cmd.Args) != 0 {
-		return fmt.Errorf("usage: %v", cmd.Name)
+	if len(cmd.Args) != 1 {
+		return fmt.Errorf("usage: %v <time_between_reqs>", cmd.Name)
 	}
 
-	link := "https://www.wagslane.dev/index.xml"
-
-	newFeed, err := rssfeeds.FetchFeed(context.Background(), link)
+	timeStr := cmd.Args[0]
+	timeBetweenRequests, err := time.ParseDuration(timeStr)
 	if err != nil {
-		return fmt.Errorf("feed cannot fetched: %v", err)
+		return fmt.Errorf("invalid duration format: %v", err)
 	}
 
-	fmt.Println("Channel Title:", newFeed.Channel.Title)
-	fmt.Println("Channel Link:", newFeed.Channel.Link)
-	fmt.Println("Channel Description:", newFeed.Channel.Description)
-	fmt.Println("Number of Items:", len(newFeed.Channel.Item))
-	fmt.Println("----------------------------------------")
+	fmt.Printf("Collecting feeds every %v\n", timeBetweenRequests)
 
-	for i, item := range newFeed.Channel.Item {
-		fmt.Printf("Item #%d\n", i+1)
-		fmt.Println("Title:", item.Title)
-		fmt.Println("Link:", item.Link)
-		fmt.Println("Description:", item.Description)
-		fmt.Println("Publication Date:", item.PubDate)
-		fmt.Println("----------------------------------------")
+	// Run immediately and then on ticker
+	ticker := time.NewTicker(timeBetweenRequests)
+	// Immediate first run, then wait for ticker
+	for ; ; <-ticker.C {
+		if err := scrapeFeeds(s); err != nil {
+			fmt.Printf("Error scraping feeds: %v\n", err)
+		}
 	}
-
-	return nil
-
 }
 
 func HandlerAddFeed(s *state.State, cmd Command, user database.User) error {
@@ -288,5 +280,40 @@ func HandlerUnfollow(s *state.State, cmd Command, user database.User) error {
 		return fmt.Errorf("failed to unfollow: %v", err)
 	}
 	fmt.Printf("successfuly unfollowed '%v'", url)
+	return nil
+}
+
+func scrapeFeeds(s *state.State) error {
+	ctx := context.Background()
+
+	// Get the next feed to fetch
+	feed, err := s.DB.GetNextFeedToFetch(ctx)
+	if err != nil {
+		return fmt.Errorf("error getting next feed to fetch: %v", err)
+	}
+
+	// Mark it as fetched
+	err = s.DB.MarkFeedFetched(ctx, feed.ID)
+	if err != nil {
+		return fmt.Errorf("error marking feed as fetched: %v", err)
+	}
+
+	fmt.Printf("Fetching feed: %s (%s)\n", feed.Name, feed.Url)
+
+	// Fetch feed using URL
+	rssFeed, err := rssfeeds.FetchFeed(ctx, feed.Url)
+	if err != nil {
+		return fmt.Errorf("error fetching feed: %v", err)
+	}
+
+	// Iterate over items and print titles
+	fmt.Printf("Found %d items in feed %s\n", len(rssFeed.Channel.Item), feed.Name)
+	for _, item := range rssFeed.Channel.Item {
+		fmt.Printf("- %s\n", item.Title)
+		fmt.Printf("  Link: %s\n", item.Link)
+		fmt.Printf("  Published: %s\n", item.PubDate)
+		fmt.Println()
+	}
+
 	return nil
 }
