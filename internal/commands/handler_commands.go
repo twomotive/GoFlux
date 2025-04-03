@@ -287,5 +287,6 @@ func HandlerUnfollow(s *state.State, cmd Command, user database.User) error {
 	if err != nil {
 		return fmt.Errorf("failed to unfollow: %v", err)
 	}
+	fmt.Printf("successfuly unfollowed '%v'", url)
 	return nil
 }
